@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Adaptive 2.5D LiDAR Mapping | DRDO - Smart Vehicles Challenge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <!-- Three.js for 3D Viewports -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+  <!-- TOP HEADER -->
+  <header class="top-header">
+    <div class="header-left">
+      <div class="header-title-group">
+        <h1 class="header-title">Adaptive 2.5D LiDAR Mapping</h1>
+        <span class="header-subtitle">DRDO – Smart Vehicles Challenge</span>
+      </div>
+    </div>
+    
+    <div class="header-center">
+      <div class="status-indicator">
+        <span class="status-dot connected" id="connectionDot"></span>
+        <span class="status-text" id="connectionStatus">LiDAR: Connected</span>
+      </div>
+      <div class="telemetry-badge">
+        <span class="badge-label">Sequence:</span>
+        <span class="badge-val" id="sequenceId">00</span>
+      </div>
+      <div class="telemetry-badge">
+        <span class="badge-label">Frame:</span>
+        <span class="badge-val mono" id="frameNumber">000256</span>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <span class="live-pill">REAL-TIME</span>
+      <div class="header-fps-group">
+        <span class="fps-label">FPS:</span>
+        <span class="fps-val mono" id="headerFps">18.7</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN DASHBOARD GRID -->
+  <main class="dashboard-grid">
+    
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar-column">
+      <!-- SENSOR INFO CARD -->
+      <div class="panel card sensor-info-card">
+        <h2 class="panel-header">SENSOR INFO</h2>
+        <div class="info-list">
+          <div class="info-row">
+            <span class="info-key">LiDAR Type</span>
+            <span class="info-val">Velodyne HDL-64E</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Points / Frame</span>
+            <span class="info-val mono" id="ptsPerFrame">~ 120,000</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Range</span>
+            <span class="info-val">1 m – 100 m</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Vertical FOV</span>
+            <span class="info-val">-24.9° to +2.0°</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Update Rate</span>
+            <span class="info-val">10 Hz</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ADAPTIVE GRID INFO CARD -->
+      <div class="panel card grid-info-card">
+        <h2 class="panel-header">ADAPTIVE GRID INFO</h2>
+        <div class="info-list">
+          <div class="info-row">
+            <span class="info-key">Grid Type</span>
+            <span class="info-val text-accent">Variable Resolution</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Near Range (0 - 10m)</span>
+            <span class="info-val text-green mono">5 cm / cell</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Mid Range (10 - 30m)</span>
+            <span class="info-val text-yellow mono">15 cm / cell</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Far Range (30 - 100m)</span>
+            <span class="info-val text-blue mono">50 cm / cell</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Grid Size (Cells)</span>
+            <span class="info-val mono">480 x 480 (Adaptive)</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key">Memory Usage</span>
+            <span class="info-val mono text-cyan" id="gridMemory">128 MB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- SEMANTIC LEGEND CARD -->
+      <div class="panel card legend-card">
+        <h2 class="panel-header">SEMANTIC LEGEND</h2>
+        <div class="legend-list">
+          <div class="legend-item"><span class="legend-swatch drivable"></span><span>Drivable Terrain</span></div>
+          <div class="legend-item"><span class="legend-swatch non-drivable"></span><span>Non-Drivable Terrain</span></div>
+          <div class="legend-item"><span class="legend-swatch road"></span><span>Road / Ground</span></div>
+          <div class="legend-item"><span class="legend-swatch static-obs"></span><span>Static Obstacle</span></div>
+          <div class="legend-item"><span class="legend-swatch dynamic-obj"></span><span>Dynamic Object</span></div>
+          <div class="legend-item"><span class="legend-swatch vegetation"></span><span>Vegetation</span></div>
+          <div class="legend-item"><span class="legend-swatch building"></span><span>Building</span></div>
+          <div class="legend-item"><span class="legend-swatch unknown"></span><span>Unknown</span></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER COLUMN: MAIN 2.5D SEMANTIC MAP & BOTTOM PANELS -->
+    <section class="center-column">
+      <!-- TOP MAIN 2.5D SEMANTIC MAP -->
+      <div class="panel main-map-panel">
+        <div class="panel-top-bar">
+          <h2 class="panel-header">2.5D SEMANTIC MAP <span class="header-tag">(Isometric 3D Objects)</span></h2>
+        </div>
+
+        <div class="canvas-wrapper" id="frontViewContainer">
+          <canvas id="frontViewCanvas"></canvas>
+        </div>
+      </div>
+
+      <!-- BOTTOM SPLIT ROW: RAW LIDAR & ELEVATION HEATMAP -->
+      <div class="bottom-split-row">
+        <!-- RAW LIDAR POINT CLOUD -->
+        <div class="panel sub-panel raw-lidar-panel">
+          <h2 class="panel-header">INPUT: RAW LIDAR POINT CLOUD</h2>
+          <div class="canvas-wrapper" id="rawLidarContainer">
+            <canvas id="rawLidarCanvas"></canvas>
+          </div>
+        </div>
+
+        <!-- 2.5D ELEVATION MAP -->
+        <div class="panel sub-panel elevation-panel">
+          <h2 class="panel-header">2.5D ELEVATION MAP</h2>
+          <div class="elevation-wrapper">
+            <canvas id="elevationCanvas"></canvas>
+            <div class="elevation-scale-bar">
+              <div class="scale-gradient"></div>
+              <div class="scale-labels">
+                <span>3.0 m</span>
+                <span>2 m</span>
+                <span>1 m</span>
+                <span>0 m</span>
+                <span>-2.0 m</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT COLUMN: 3D VIEWS, ADAPTIVE OVERVIEW & PERFORMANCE METRICS -->
+    <aside class="right-column">
+      <!-- TOP VIEW 2D -->
+      <div class="panel side-panel">
+        <h2 class="panel-header">TOP VIEW <span class="header-tag">(2D GRID MAP)</span></h2>
+        
+        <div class="canvas-wrapper">
+          <canvas id="topSemanticCanvas"></canvas>
+        </div>
+      </div>
+
+      <!-- SIDE VIEW ELEVATION -->
+      <div class="panel right-panel side-view-panel">
+        <h2 class="panel-header">SIDE VIEW <span class="header-tag">(ELEVATION)</span></h2>
+        <div class="side-view-wrapper" id="sideViewContainer">
+          <canvas id="sideViewCanvas"></canvas>
+          <div class="height-scale-labels">
+            <span>10 m</span>
+            <span>5 m</span>
+            <span>0 m</span>
+            <span>-5 m</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ADAPTIVE RESOLUTION OVERVIEW -->
+      <div class="panel right-panel adaptive-overview-panel">
+        <h2 class="panel-header">ADAPTIVE RESOLUTION OVERVIEW</h2>
+        <div class="overview-content">
+          <div class="fan-diagram">
+            <svg viewBox="0 0 160 100" class="radar-svg">
+              <path d="M 10 90 A 80 80 0 0 1 80 15 L 10 90 Z" fill="rgba(33, 150, 243, 0.25)" stroke="#2196f3" stroke-width="1.5" />
+              <path d="M 10 90 A 55 55 0 0 1 60 40 L 10 90 Z" fill="rgba(0, 230, 118, 0.35)" stroke="#00e676" stroke-width="1.5" />
+              <path d="M 10 90 A 30 30 0 0 1 38 65 L 10 90 Z" fill="rgba(0, 230, 118, 0.65)" stroke="#00e676" stroke-width="2" />
+              <line x1="10" y1="90" x2="90" y2="10" stroke="rgba(255,255,255,0.4)" stroke-width="1" stroke-dasharray="2,2" />
+            </svg>
+          </div>
+          <div class="zone-breakdown">
+            <div class="zone-row"><span class="zone-range">0 - 10 m</span><span class="zone-arrow">→</span><span class="zone-res text-green">5 cm</span></div>
+            <div class="zone-row"><span class="zone-range">10 - 30 m</span><span class="zone-arrow">→</span><span class="zone-res text-yellow">15 cm</span></div>
+            <div class="zone-row"><span class="zone-range">30 - 100 m</span><span class="zone-arrow">→</span><span class="zone-res text-blue">50 cm</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PERFORMANCE METRICS & GAUGES -->
+      <div class="panel right-panel metrics-panel">
+        <h2 class="panel-header">PERFORMANCE METRICS</h2>
+        <div class="metrics-grid">
+          <!-- Dual Gauges -->
+          <div class="gauges-container">
+            <!-- FPS Gauge -->
+            <div class="gauge-card">
+              <div class="gauge-svg-wrap">
+                <svg viewBox="0 0 120 70" class="gauge-svg">
+                  <!-- Background Arc -->
+                  <path d="M 15 65 A 45 45 0 0 1 105 65" fill="none" stroke="#1c2838" stroke-width="10" stroke-linecap="round"/>
+                  <!-- Value Arc -->
+                  <path id="fpsArc" d="M 15 65 A 45 45 0 0 1 105 65" fill="none" stroke="#00e676" stroke-width="10" stroke-linecap="round" stroke-dasharray="141.37" stroke-dashoffset="35"/>
+                </svg>
+                <div class="gauge-center-val">
+                  <span class="gauge-num" id="gaugeFps">18.7</span>
+                </div>
+              </div>
+              <span class="gauge-title">FPS</span>
+              <span class="gauge-target">(Target ≥ 15 FPS)</span>
+            </div>
+
+            <!-- Latency Gauge -->
+            <div class="gauge-card">
+              <div class="gauge-svg-wrap">
+                <svg viewBox="0 0 120 70" class="gauge-svg">
+                  <!-- Background Arc -->
+                  <path d="M 15 65 A 45 45 0 0 1 105 65" fill="none" stroke="#1c2838" stroke-width="10" stroke-linecap="round"/>
+                  <!-- Value Arc -->
+                  <path id="latencyArc" d="M 15 65 A 45 45 0 0 1 105 65" fill="none" stroke="#ffd600" stroke-width="10" stroke-linecap="round" stroke-dasharray="141.37" stroke-dashoffset="65"/>
+                </svg>
+                <div class="gauge-center-val">
+                  <span class="gauge-num" id="gaugeLatency">53</span><span class="gauge-unit">ms</span>
+                </div>
+              </div>
+              <span class="gauge-title">Latency</span>
+              <span class="gauge-target">(Target ≤ 100 ms)</span>
+            </div>
+          </div>
+
+          <!-- Numerical Metrics Table -->
+          <div class="metrics-table">
+            <div class="m-row">
+              <span class="m-label">Point Accuracy</span>
+              <span class="m-val mono text-accent" id="metricAccuracy">92.6 %</span>
+            </div>
+            <div class="m-row">
+              <span class="m-label">mIoU (Segmentation)</span>
+              <span class="m-val mono text-accent" id="metricMiou">88.3 %</span>
+            </div>
+            <div class="m-row">
+              <span class="m-label">Memory Usage</span>
+              <span class="m-val mono" id="metricMem">128 MB</span>
+            </div>
+            <div class="m-row">
+              <span class="m-label">CPU Usage</span>
+              <span class="m-val mono" id="metricCpu">45 %</span>
+            </div>
+            <div class="m-row">
+              <span class="m-label">GPU Usage</span>
+              <span class="m-val mono" id="metricGpu">62 %</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
