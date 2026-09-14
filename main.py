@@ -89,6 +89,7 @@ async def main_pipeline():
                 'cpu_usage': round(cpu_usage if cpu_usage > 0 else 45.0, 1),
                 'gpu_usage': round(gpu_usage, 1),
                 'cells': grid_results['cells'],
+                'raw_points': grid_results['raw_points'],
                 'elevation_map': grid_results['elevation_map'],
                 'bounding_boxes': grid_results['bounding_boxes']
             }
@@ -99,7 +100,7 @@ async def main_pipeline():
             print(
                 f"\rFrame #{frame_idx + 1:04d} | "
                 f"Points: {len(points):,d} | "
-                f"2.5D Cells: {len(grid_results['cells']):,d} | "
+                f"2.5D Cells: {grid_results['compressed_cells_count']:,d} | "
                 f"FPS: {avg_fps:.1f} | "
                 f"Latency: {frame_time_ms:.1f}ms | "
                 f"Acc: {seg_results['accuracy']}% | "

@@ -1,4 +1,5 @@
 import numpy as np
+import base64
 
 class AdaptiveFoveatedGrid:
     """
@@ -67,46 +68,56 @@ class AdaptiveFoveatedGrid:
         # Map key: (res_tier, grid_x, grid_y)
         res_tiers = np.where(distances <= 10.0, 0, np.where(distances <= 30.0, 1, 2))
         
-        grid_dict = {}
-        # Downsample iteration for high performance
-        stride = 1 if N_pts < 30000 else int(np.ceil(N_pts / 30000))
-        indices = np.arange(0, N_pts, stride)
+        # Fully Vectorized Spatial Hashing for High FPS
+        # 1. Priorities: Dynamic(4)=100, Static(3)=90, others keep original value
+        priority = valid_lbls.copy()
+        priority[valid_lbls == 4] = 100
+        priority[valid_lbls == 3] = 90
         
-        for i in indices:
-            key = (int(res_tiers[i]), int(grid_x[i]), int(grid_y[i]))
-            pt_z = float(valid_pts[i, 2])
-            lbl = int(valid_lbls[i])
-            
-            if key not in grid_dict:
-                grid_dict[key] = {
-                    'x': float(valid_pts[i, 0]),
-                    'y': float(valid_pts[i, 1]),
-                    'min_z': pt_z,
-                    'max_z': pt_z,
-                    'label': lbl,
-                    'res': float(cell_res[i]),
-                    'count': 1
-                }
-            else:
-                c = grid_dict[key]
-                if pt_z < c['min_z']: c['min_z'] = pt_z
-                if pt_z > c['max_z']: c['max_z'] = pt_z
-                # Priority to high-risk dynamic (4) and static obstacles (3)
-                if lbl in (4, 3) or (c['label'] not in (4, 3) and lbl > c['label']):
-                    c['label'] = lbl
-                c['count'] += 1
-
-        # Format compressed cells for streaming
-        compressed_cells = []
-        for key, c in grid_dict.items():
-            compressed_cells.append([
-                round(c['x'], 2),
-                round(c['y'], 2),
-                round(c['max_z'], 2),
-                round(c['max_z'] - c['min_z'], 2), # delta Z (height)
-                c['label'],
-                round(c['res'], 2)
-            ])
+        # 2. Sort by priority descending to keep the highest priority label for each bucket
+        sort_idx = np.argsort(-priority)
+        
+        sorted_z = valid_pts[sort_idx, 2]
+        sorted_lbls = valid_lbls[sort_idx]
+        sorted_res = cell_res[sort_idx]
+        sorted_grid_x = grid_x[sort_idx]
+        sorted_grid_y = grid_y[sort_idx]
+        sorted_tiers = res_tiers[sort_idx]
+        
+        # 3. Create unique 64-bit keys for buckets
+        # tiers (0-2) in highest bits, grid_x and grid_y (approx -2000 to 2000) in lower bits
+        keys = (sorted_tiers.astype(np.int64) << 40) | ((sorted_grid_x.astype(np.int64) & 0xFFFFF) << 20) | (sorted_grid_y.astype(np.int64) & 0xFFFFF)
+        
+        unique_keys, unique_indices, inverse_indices = np.unique(keys, return_index=True, return_inverse=True)
+        
+        # 4. Extract dominant features for each bucket (first occurrence has highest priority)
+        final_labels = sorted_lbls[unique_indices]
+        final_res = sorted_res[unique_indices]
+        final_grid_x = sorted_grid_x[unique_indices]
+        final_grid_y = sorted_grid_y[unique_indices]
+        
+        # 5. Fast Min/Max Z aggregation
+        max_z = np.full(len(unique_keys), -1000.0, dtype=np.float32)
+        min_z = np.full(len(unique_keys), 1000.0, dtype=np.float32)
+        np.maximum.at(max_z, inverse_indices, sorted_z)
+        np.minimum.at(min_z, inverse_indices, sorted_z)
+        
+        # 6. Calculate exactly aligned centers
+        bucket_center_x = (final_grid_x * final_res) + (final_res / 2.0)
+        bucket_center_y = (final_grid_y * final_res) + (final_res / 2.0)
+        delta_z = max_z - min_z
+        
+        # 7. Fast matrix formatting for JSON
+        compressed_cells_arr = np.column_stack((
+            np.round(bucket_center_x, 2),
+            np.round(bucket_center_y, 2),
+            np.round(max_z, 2),
+            np.round(delta_z, 2),
+            final_labels,
+            np.round(final_res, 2)
+        ))
+        
+        compressed_cells = compressed_cells_arr.flatten().tolist()
 
         # Generate 2.5D Elevation Map (64x64 grid matrix normalized for turbo colormap)
         grid_dim = 64
@@ -129,17 +140,24 @@ class AdaptiveFoveatedGrid:
 
         # Calculate memory & compression analytics
         raw_bytes = len(points) * 16 # 4 floats = 16 bytes per raw LiDAR point
-        compressed_bytes = len(compressed_cells) * 12 # 2.5D compact representation
+        compressed_bytes = (len(compressed_cells) // 6) * 12 # 2.5D compact representation
         raw_mb = round(raw_bytes / (1024 * 1024), 2)
         comp_mb = round(compressed_bytes / (1024 * 1024), 2)
         comp_ratio = round((1.0 - (comp_mb / max(raw_mb, 0.001))) * 100.0, 1)
+
+        # Spatially distributed downsampling (Voxel Grid) for raw points
+        voxel_size = 0.6
+        voxel_coords = np.floor(valid_pts[:, :3] / voxel_size).astype(np.int32)
+        _, unique_indices = np.unique(voxel_coords, axis=0, return_index=True)
+        downsampled_raw_points = valid_pts[unique_indices, :3].flatten().tolist()
 
         return {
             'cells': compressed_cells,
             'elevation_map': elev_matrix.tolist(),
             'bounding_boxes': bounding_boxes,
+            'raw_points': downsampled_raw_points,
             'raw_points_count': len(points),
-            'compressed_cells_count': len(compressed_cells),
+            'compressed_cells_count': len(compressed_cells) // 6,
             'compression_ratio': comp_ratio,
             'memory_usage_mb': comp_mb,
             'raw_memory_mb': raw_mb

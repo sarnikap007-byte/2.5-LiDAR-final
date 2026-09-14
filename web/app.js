@@ -149,20 +149,23 @@ function renderTopSemanticMap(cells) {
 
   // 2. Render 2.5D Semantic Cells
   if (cells && cells.length > 0) {
-    for (let i = 0; i < cells.length; i++) {
-      const [x, y, max_z, delta_z, label, res] = cells[i];
+    const numCells = cells.length / 6;
+    for (let i = 0; i < numCells; i++) {
+      const x = cells[i * 6];
+      const y = cells[i * 6 + 1];
+      const max_z = cells[i * 6 + 2];
+      const delta_z = cells[i * 6 + 3];
+      const label = cells[i * 6 + 4];
+      const res = cells[i * 6 + 5];
       const px = cx + y * meterToPx; // Forward is UP (-Y in screen space, +X in LiDAR)
       const py = cy - x * meterToPx;
 
-      // To ensure a SOLID gapless map (avoiding the "point cloud" look), we draw the cell slightly larger 
-      // so it visually merges with its neighbors, perfectly mimicking a dense grid map.
-      const displaySize = res < 0.15 ? 0.15 : res; // Ensure minimum visual size matches our data spacing
-      const cellSizePx = Math.max((displaySize + 0.02) * meterToPx, 4.0);
+      // Inflate visual size of smallest cells slightly to bridge LiDAR scan gaps, avoiding black holes
+      const displaySize = Math.max(res, 0.12);
+      const displaySizePx = displaySize * meterToPx;
       
       topCtx.fillStyle = SEMANTIC_COLORS[label] || '#90a4ae';
-      topCtx.fillRect(px - cellSizePx / 2, py - cellSizePx / 2, cellSizePx, cellSizePx);
-      
-      // Removed black borders to ensure the map looks continuously solid and clean
+      topCtx.fillRect(px - displaySizePx / 2, py - displaySizePx / 2, displaySizePx, displaySizePx);
     }
   }
 
@@ -218,7 +221,8 @@ function renderElevationMap(matrix) {
 // ==========================================================
 // 3. THREE.JS 3D VIEWPORTS (Main Isometric, Raw, Side)
 // ==========================================================
-let frontInstancedMesh, sideInstancedMesh;
+let frontMesh, frontPointsOverlay;
+let sideInstancedMesh;
 let frontOrbitControls;
 const dummyQuaternion = new THREE.Quaternion();
 const dummyPosition = new THREE.Vector3();
@@ -346,82 +350,167 @@ function getSemanticHeight(label, max_z, delta_z) {
   }
 }
 
-function updateThreeJSPointClouds(cells, boxes) {
+function updateThreeJSPointClouds(msg) {
+  const cells = msg.cells;
+  const boxes = msg.bounding_boxes;
+  const rawPoints = msg.raw_points;
+  
   if (!cells || cells.length === 0) return;
 
   const N = cells.length;
-  const rawPositions = new Float32Array(N * 3);
-  const rawColors = new Float32Array(N * 3);
 
-  // Create/resize InstancedMesh for solid 3D voxels
+  // 1. Raw Point Cloud Panel (bottom-left)
+  if (rawPoints && rawPoints.length > 0) {
+    if (rawPointsMesh) {
+      if (rawPointsMesh.geometry) rawPointsMesh.geometry.dispose();
+      if (rawPointsMesh.material) rawPointsMesh.material.dispose();
+      rawScene.remove(rawPointsMesh);
+    }
+    const rawGeo = new THREE.BufferGeometry();
+    const rawPos = new Float32Array(rawPoints.length);
+    const rawCol = new Float32Array(rawPoints.length);
+    const numRaw = rawPoints.length / 3;
+    for (let i = 0; i < numRaw; i++) {
+       const z = rawPoints[i*3+2];
+       rawPos[i*3] = rawPoints[i*3];
+       rawPos[i*3+1] = rawPoints[i*3+1];
+       rawPos[i*3+2] = z;
+       // basic coloring based on z height
+       const intensity = Math.min(1.0, Math.max(0.3, (z + 2) / 4));
+       rawCol[i*3] = intensity * 0.8;
+       rawCol[i*3+1] = intensity;
+       rawCol[i*3+2] = intensity;
+    }
+    rawGeo.setAttribute('position', new THREE.BufferAttribute(rawPos, 3));
+    rawGeo.setAttribute('color', new THREE.BufferAttribute(rawCol, 3));
+    const rawMat = new THREE.PointsMaterial({ size: 0.15, vertexColors: true });
+    rawPointsMesh = new THREE.Points(rawGeo, rawMat);
+    rawScene.add(rawPointsMesh);
+  }
+
+  // 2. Exact Resolution 2.5D Grid Mesh (Main Panel)
+  if (frontMesh) {
+    frontScene.remove(frontMesh);
+    if (frontMesh.dispose) frontMesh.dispose();
+  }
+  if (frontPointsOverlay) {
+    if (frontPointsOverlay.geometry) frontPointsOverlay.geometry.dispose();
+    if (frontPointsOverlay.material) frontPointsOverlay.material.dispose();
+    frontScene.remove(frontPointsOverlay);
+  }
+
+  const numCells = cells.length / 6;
+  const positions = new Float32Array(numCells * 3);
+  const colors = new Float32Array(numCells * 3);
+
+  let validCells = 0;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+
+  // We still update the side view (Elevation Profile) with instanced cubes
   const cellGeo = new THREE.BoxGeometry(1, 1, 1);
-  const cellMat = new THREE.MeshPhongMaterial({ 
-    color: 0xffffff, 
-    flatShading: true,
-    shininess: 10
-  });
-
-  if (frontInstancedMesh) frontScene.remove(frontInstancedMesh);
+  const cellMat = new THREE.MeshPhongMaterial({ color: 0xffffff, flatShading: true, shininess: 10 });
   if (sideInstancedMesh) sideScene.remove(sideInstancedMesh);
+  sideInstancedMesh = new THREE.InstancedMesh(cellGeo, cellMat, numCells);
 
-  frontInstancedMesh = new THREE.InstancedMesh(cellGeo, cellMat, N);
-  sideInstancedMesh = new THREE.InstancedMesh(cellGeo, cellMat, N);
+  for (let i = 0; i < numCells; i++) {
+    const x = cells[i * 6];
+    const y = cells[i * 6 + 1];
+    const max_z = cells[i * 6 + 2];
+    const delta_z = cells[i * 6 + 3];
+    const label = cells[i * 6 + 4];
+    const res = cells[i * 6 + 5];
+    
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = max_z;
+    
+    if (max_z < minZ) minZ = max_z;
+    if (max_z > maxZ) maxZ = max_z;
+    validCells++;
 
-  const colorObj = new THREE.Color();
-
-  for (let i = 0; i < N; i++) {
-    const [x, y, max_z, delta_z, label, res] = cells[i];
-    
-    // Raw point cloud (bottom-left panel)
-    rawPositions[i * 3 + 0] = x;
-    rawPositions[i * 3 + 1] = y;
-    rawPositions[i * 3 + 2] = max_z;
-    rawColors[i * 3 + 0] = 0.85;
-    rawColors[i * 3 + 1] = 0.88;
-    rawColors[i * 3 + 2] = 0.95;
-
-    // Get solid block dimensions for this semantic class
-    const { h, z } = getSemanticHeight(label, max_z, delta_z);
-    
-    // Block width = cell resolution (slightly oversized to eliminate gaps)
-    const blockW = res + 0.02;
-    
-    // Build the transformation matrix: scale then translate
-    dummyPosition.set(x, y, z);
-    dummyScale.set(blockW, blockW, h);
-    instanceMatrix.compose(dummyPosition, dummyQuaternion, dummyScale);
-    
-    frontInstancedMesh.setMatrixAt(i, instanceMatrix);
-    sideInstancedMesh.setMatrixAt(i, instanceMatrix);
-    
-    // Semantic color
     const semColor = THREE_SEMANTIC_COLORS[label] || THREE_SEMANTIC_COLORS[7];
-    frontInstancedMesh.setColorAt(i, semColor);
+    colors[i * 3] = semColor.r;
+    colors[i * 3 + 1] = semColor.g;
+    colors[i * 3 + 2] = semColor.b;
+
+    // Side view update
+    const { h, z } = getSemanticHeight(label, max_z, delta_z);
+    dummyPosition.set(x, y, z);
+    // Inflate box by 4cm to bridge sparse LiDAR points, removing 'black hole' illusion
+    dummyScale.set(res + 0.04, res + 0.04, h);
+    instanceMatrix.compose(dummyPosition, dummyQuaternion, dummyScale);
+    sideInstancedMesh.setMatrixAt(i, instanceMatrix);
     sideInstancedMesh.setColorAt(i, semColor);
   }
 
-  frontInstancedMesh.instanceMatrix.needsUpdate = true;
-  if (frontInstancedMesh.instanceColor) frontInstancedMesh.instanceColor.needsUpdate = true;
   sideInstancedMesh.instanceMatrix.needsUpdate = true;
   if (sideInstancedMesh.instanceColor) sideInstancedMesh.instanceColor.needsUpdate = true;
-
-  frontScene.add(frontInstancedMesh);
   sideScene.add(sideInstancedMesh);
 
-  // Raw Point Cloud Mesh
-  if (rawPointsMesh) rawScene.remove(rawPointsMesh);
-  const rawGeo = new THREE.BufferGeometry();
-  rawGeo.setAttribute('position', new THREE.BufferAttribute(rawPositions, 3));
-  rawGeo.setAttribute('color', new THREE.BufferAttribute(rawColors, 3));
-  const rawMat = new THREE.PointsMaterial({ size: 0.18, vertexColors: true });
-  rawPointsMesh = new THREE.Points(rawGeo, rawMat);
-  rawScene.add(rawPointsMesh);
+  // Generate Exact InstancedMesh for 2.5D Semantic Map
+  const frontGeo = new THREE.BoxGeometry(1, 1, 1);
+  const frontMat = new THREE.MeshPhongMaterial({ color: 0xffffff, flatShading: true, shininess: 5 });
+  frontMesh = new THREE.InstancedMesh(frontGeo, frontMat, numCells);
+
+  for (let i = 0; i < numCells; i++) {
+    const x = cells[i * 6];
+    const y = cells[i * 6 + 1];
+    const max_z = cells[i * 6 + 2];
+    const delta_z = cells[i * 6 + 3];
+    const label = cells[i * 6 + 4];
+    const res = cells[i * 6 + 5];
+    const semColor = THREE_SEMANTIC_COLORS[label] || THREE_SEMANTIC_COLORS[7];
+    const { h, z } = getSemanticHeight(label, max_z, delta_z);
+    
+    dummyPosition.set(x, y, z);
+    // Inflate box by 4cm to bridge sparse LiDAR points, ensuring solid block structure without holes
+    dummyScale.set(res + 0.04, res + 0.04, h);
+    instanceMatrix.compose(dummyPosition, dummyQuaternion, dummyScale);
+    
+    frontMesh.setMatrixAt(i, instanceMatrix);
+    frontMesh.setColorAt(i, semColor);
+  }
+  
+  frontMesh.instanceMatrix.needsUpdate = true;
+  if (frontMesh.instanceColor) frontMesh.instanceColor.needsUpdate = true;
+  
+  // Create points overlay
+  const ptsGeo = new THREE.BufferGeometry();
+  ptsGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  ptsGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const pointsMat = new THREE.PointsMaterial({ size: 0.2, vertexColors: true });
+  frontPointsOverlay = new THREE.Points(ptsGeo, pointsMat);
+
+  // Apply UI View Modes
+  const viewMode = document.getElementById('viewMode').value;
+  frontMesh.visible = viewMode === '2.5D' || viewMode === '2.5D+Points';
+  frontPointsOverlay.visible = viewMode === 'Points' || viewMode === '2.5D+Points';
+
+  // Apply Z Exaggeration
+  const zScale = parseFloat(document.getElementById('zExaggeration').value);
+  frontMesh.scale.set(1, 1, zScale);
+  frontPointsOverlay.scale.set(1, 1, zScale);
+
+  frontScene.add(frontMesh);
+  frontScene.add(frontPointsOverlay);
+
+  // Console Telemetry
+  console.log(`[Validation Metrics]
+  - raw LiDAR point count: ${msg.raw_points_count || 0}
+  - downsampled raw point count: ${rawPoints ? rawPoints.length / 3 : 0}
+  - adaptive cell count: ${numCells}
+  - valid elevation cell count: ${validCells}
+  - minimum Z: ${minZ.toFixed(3)}
+  - maximum Z: ${maxZ.toFixed(3)}
+  - Z range: ${(maxZ - minZ).toFixed(3)}
+  - maxZ > minZ: ${maxZ > minZ}`);
 
   // 3D Bounding Boxes for dynamic objects
-  updateBoundingBoxes(boxes);
+  updateBoundingBoxes(boxes, zScale);
 }
 
-function updateBoundingBoxes(boxes) {
+function updateBoundingBoxes(boxes, zScale = 1.0) {
   while (frontBoxGroup.children.length > 0) frontBoxGroup.remove(frontBoxGroup.children[0]);
   while (sideBoxGroup.children.length > 0) sideBoxGroup.remove(sideBoxGroup.children[0]);
 
@@ -441,7 +530,8 @@ function updateBoundingBoxes(boxes) {
     });
     
     const mesh1 = new THREE.Mesh(geometry, material);
-    mesh1.position.set(cx, cy, cz);
+    mesh1.position.set(cx, cy, cz * zScale);
+    mesh1.scale.set(1, 1, zScale);
     frontBoxGroup.add(mesh1);
 
     const mesh2 = mesh1.clone();
@@ -451,7 +541,8 @@ function updateBoundingBoxes(boxes) {
     const edges = new THREE.EdgesGeometry(geometry);
     const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 });
     const outline = new THREE.LineSegments(edges, lineMat);
-    outline.position.set(cx, cy, cz);
+    outline.position.set(cx, cy, cz * zScale);
+    outline.scale.set(1, 1, zScale);
     frontBoxGroup.add(outline);
   });
 }
@@ -531,19 +622,20 @@ function connectWebSocket() {
     document.getElementById('connectionStatus').innerText = 'LiDAR: Connected';
   };
 
-  ws.onmessage = (event) => {
+  ws.onmessage = async (event) => {
     try {
       const msg = JSON.parse(event.data);
+      
       // Update views
       if (msg.cells) {
         renderTopSemanticMap(msg.cells);
-        updateThreeJSPointClouds(msg.cells, msg.bounding_boxes);
+        updateThreeJSPointClouds(msg);
       }
       if (msg.elevation_map) {
         renderElevationMap(msg.elevation_map);
       }
       updateGaugesAndMetrics(msg);
-    } catch (err) {
+    } catch (err) { document.getElementById('connectionStatus').innerText = 'ERROR: ' + err.message + ' | ' + err.stack; document.getElementById('connectionStatus').style.color = 'red';
       console.error('[WS] Parse error:', err);
     }
   };
